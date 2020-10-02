@@ -1,0 +1,359 @@
+---
+title: "Spurious lag climate growth correlations"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r include=FALSE}
+
+
+rm(list = ls())
+library(tidyverse)
+library(cowplot)
+library(zoo)
+library(lme4)
+knitr::opts_knit$set(dpi = 50)
+
+```
+
+#### Question
+- Does negative size x growth dependence create spurious climate lag effects in models of plant performance?
+
+##### Analysis: 
+- Simulate growth of n individuals over t years using a log Gompertz model. 
+- Growth is size dependent, meaning large plants tend to grow proportionally slower. This prevents plants from growing indefinitely. 
+- Growth is sensitive to fluctuating annual environment symbolized by *E*.
+- Individual variation in growth parameters means some plants may reach a larger equilibrium size than others.  
+
+```{r, dpi=50}
+# Parmaeters: 
+set.seed(1)
+t <- 30
+n <- 500
+a <- 0.5 # Intrinsic growth rate 
+b <- 0.5 # Size limitation 
+E <- rnorm(t) # Annual environental variation 
+beta <- 0.25 # Environment effect
+init_size <- 0.1 # Initial size 
+sig <- 0.3 # process noise 
+
+X <- matrix(NA, t, n)
+X[1,] <- init_size 
+
+for ( i in 2:t ){ 
+    mu <- a + b*X[i-1, ] + beta*E[i-1]
+    X[i, ] <- rnorm(n,  mu, sig) 
+}
+
+dat <- 
+  data.frame(t = 1:t , size = X, E = E) %>% 
+  gather( id, size, starts_with('size')) %>% 
+  mutate( id = as.numeric(factor( id )))
+
+E_plot <- 
+  dat %>% 
+  distinct( t, E ) %>% 
+  ggplot( aes( x = t, y = E)) + 
+  geom_line()  + 
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank()) 
+
+x_plot <- 
+  dat %>% 
+  filter( id < 8) %>% 
+  ggplot( aes( x = t, y = size, group = id, color = factor( id ) )) + 
+  geom_line( alpha = 0.9)  + 
+  theme_bw()  + 
+  scale_y_continuous(name = 'Size (log)' ) +  
+  scale_x_continuous(name = 'time') + 
+  scale_color_discrete(guide = 'none')
+  
+
+plot_grid(E_plot, x_plot, align = 'v' , ncol = 1)
+
+```
+
+**Figure 1. Simulated environmental variation (upper plot) and simulated size of a eight individual plants (lower plot) over 30 years.**
+
+In the simulation, growth between year t and t + 1 is only sensitive to the environment in year t. No other lagged years of climate contribute to growth. 
+
+Now we can check for correlations between various lags in the time series. 
+
+```{r, dpi=50}
+
+
+dat <- 
+  dat %>% 
+  group_by( id ) %>% 
+  arrange( id, t ) %>% 
+  mutate(size0 = lag(size), lag1 = lag( E ), lag2 = lag( E, 2 ), lag3 = lag(E, 3), lag4 = lag(E, 4)) %>% 
+  mutate( log_growth = size - size0) %>% 
+  mutate( rll_E = rollmean( lag( E, 2), k = 4, align = 'right', fill = NA)) 
+
+dat_long <- 
+  dat %>% 
+  ungroup() %>% 
+  filter( complete.cases(.)) %>% 
+  gather( lag, Env, starts_with('lag'), rll_E) 
+
+lag_cors <-
+  dat_long %>% 
+  group_by( lag ) %>% 
+  summarise( r = round( cor( log_growth, Env ), 2)) %>% 
+  mutate( label = paste0( 'r = ', r), pos_x = 0.5, pos_y = max(dat$log_growth, na.rm = T )*0.95)
+
+subsamp <- dat_long %>% group_by( t ) %>% sample_frac(0.1, replace = F) # subsample to draw fewer points 
+
+dat_long %>% 
+  ggplot( aes( x = Env, y = log_growth )) + 
+  geom_point( data = subsamp  , aes( x = Env, y= log_growth ), alpha = 0.1) +
+  geom_smooth( method = 'lm', se = F) + 
+  geom_text( data = lag_cors, aes( label = label, x = pos_x, y = pos_y), hjust = 1) + 
+  facet_wrap( ~ lag, nrow = 1, scales = 'free_x')
+
+
+
+```
+
+**Figure 2. Correlation between log growth rate of each individual each year and environmental conditions at 4 different lags. "rll_E" is rolling mean of Env for four years prior to transition.** 
+
+Growth between year t and t + 1 is positively correlated with E in year t (identified as "lag1" in the figure).  It is negatively correlated with E lagged over 1 to 3 years ("lag2" through "lag4"). It is also negatively correlated with a rolling mean of E from year t - 4 to t - 1.  
+
+Now I attempt to fit a linear model to the data to describe size dependence and environmental effects.  
+
+```{r, dpi=50}
+
+m1 <- lm( data = dat, size ~ size0 + lag1 + lag2 + lag3 + lag4 + rll_E )
+
+summary(m1)
+
+```
+
+The model estimates the parameters of the simulation accurately.  Despite the negative correlation between lagged climate and growth observed in the figure above, there are no strong lagged climate effects in the model. 
+
+The above simulation and model fitting shows that a positive climate effect in one year can produce spurious negative correlations between growth and lagged climate.  However, accounting for size dependence in the growth model fixes this problem. 
+
+#### Including individual variation in growth 
+
+The above simulation and model fitting process assumed all individual plants had the same underlying growth parameters (*a* and *b* above).  However, its reasonable to expect that these processes vary by plant to some degree. We can simulate this by introducing noise into growth parameters *a* and/or *b*.  
+
+```{r, dpi=50}
+
+# Other parematers as above 
+
+b <- runif(n,  0.2 , 0.9 ) # introduce noise in b
+X <- matrix(NA, t, n)
+X[1,] <- init_size 
+
+for ( i in 2:t ){ 
+    mu <- a + b*X[i-1, ] + beta*E[i-1]
+    X[i, ] <- rnorm(n,  mu, sig) 
+}
+
+dat <- 
+  data.frame(t = 1:t , size = X, E = E) %>% 
+  gather( id, size, starts_with('size')) %>% 
+  mutate( id = as.numeric(factor( id )))
+
+E_plot <- 
+  dat %>% 
+  distinct( t, E ) %>% 
+  ggplot( aes( x = t, y = E)) + 
+  geom_line()  + 
+  theme_bw() + 
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank()) 
+
+x_plot <- 
+  dat %>% 
+  filter( id < 8) %>% 
+  ggplot( aes( x = t, y = size, group = id, color = factor( id ) )) + 
+  geom_line( alpha = 0.9)  + 
+  theme_bw()  + 
+  scale_y_continuous(name = 'Size (log)' ) +  
+  scale_x_continuous(name = 'time') + 
+  scale_color_discrete(guide = 'none')
+  
+#plot_grid(E_plot, x_plot, align = 'v' , ncol = 1)
+
+dat <- 
+  dat %>% 
+  group_by( id ) %>% 
+  arrange( id, t ) %>% 
+  mutate(size0 = lag(size), lag1 = lag( E ), lag2 = lag( E, 2 ), lag3 = lag(E, 3), lag4 = lag(E, 4)) %>% 
+  mutate( log_growth = size - size0) %>% 
+  mutate( rll_E = rollmean( lag( E, 2), k = 4, align = 'right', fill = NA)) 
+
+dat_long <- 
+  dat %>% 
+  ungroup() %>% 
+  filter( complete.cases(.)) %>% 
+  gather( lag, Env, starts_with('lag'), rll_E) 
+
+lag_cors <-
+  dat_long %>% 
+  group_by( lag ) %>% 
+  summarise( r = round( cor( log_growth, Env ), 2)) %>% 
+  mutate( label = paste0( 'r = ', r), pos_x = 0.5, pos_y = max(dat$log_growth, na.rm = T )*0.95)
+
+
+subsamp <- dat_long %>% group_by( t ) %>% sample_frac(0.1, replace = F) # subsample to draw fewer points 
+
+dat_long %>% 
+  ggplot( aes( x = Env, y = log_growth )) + 
+  geom_point( data = subsamp  , aes( x = Env, y= log_growth ), alpha = 0.1) +
+  geom_smooth( method = 'lm', se = F) + 
+  geom_text( data = lag_cors, aes( label = label, x = pos_x, y = pos_y), hjust = 1) + 
+  facet_wrap( ~ lag, nrow = 1, scales = 'free_x')
+
+
+```
+
+```{r, dpi = 50 }
+
+m1 <- lm( data = dat, size ~ size0 + lag1 + lag2 + lag3 + lag4 + rll_E )
+
+summary(m1)
+
+```
+
+Because individuals vary in the parameter *b* fitting only a single parameter estimate for all individuals leads to a spurious negative climate effect showing up in the model. 
+
+We can repeat this as above except introducing random variation in *a*. 
+
+```{r}
+b <- 0.5 
+a <- rbeta(n, 2, 2) # introduce noise in a
+X <- matrix(NA, t, n)
+X[1,] <- init_size 
+
+for ( i in 2:t ){ 
+    mu <- a + b*X[i-1, ] + beta*E[i-1]
+    X[i, ] <- rnorm(n,  mu, sig) 
+}
+
+dat <- 
+  data.frame(t = 1:t , size = X, E = E) %>% 
+  gather( id, size, starts_with('size')) %>% 
+  mutate( id = as.numeric(factor( id )))
+
+dat <- 
+  dat %>% 
+  group_by( id ) %>% 
+  arrange( id, t ) %>% 
+  mutate(size0 = lag(size), lag1 = lag( E ), lag2 = lag( E, 2 ), lag3 = lag(E, 3), lag4 = lag(E, 4)) %>% 
+  mutate( log_growth = size - size0) %>% 
+  mutate( rll_E = rollmean( lag( E, 2), k = 4, align = 'right', fill = NA)) 
+
+dat_long <- 
+  dat %>% 
+  ungroup() %>% 
+  filter( complete.cases(.)) %>% 
+  gather( lag, Env, starts_with('lag'), rll_E) 
+
+lag_cors <-
+  dat_long %>% 
+  group_by( lag ) %>% 
+  summarise( r = round( cor( log_growth, Env ), 2)) %>% 
+  mutate( label = paste0( 'r = ', r), pos_x = 0.5, pos_y = max(dat$log_growth, na.rm = T )*0.95)
+
+
+subsamp <- dat_long %>% group_by( t ) %>% sample_frac(0.1, replace = F) # subsample to draw fewer points 
+
+dat_long %>% 
+  ggplot( aes( x = Env, y = log_growth )) + 
+  geom_point( data = subsamp  , aes( x = Env, y= log_growth ), alpha = 0.1) +
+  geom_smooth( method = 'lm', se = F) + 
+  geom_text( data = lag_cors, aes( label = label, x = pos_x, y = pos_y), hjust = 1) + 
+  facet_wrap( ~ lag, nrow = 1, scales = 'free_x')
+
+```
+
+
+```{r}
+
+m1 <- lm( data = dat, size ~ size0 + lag1 + lag2 + lag3 + lag4 + rll_E )
+summary(m1)
+
+
+```
+
+Again there are weak but significant spurious effects of lag climate. 
+
+Now consider variation in both *a* and *b*. 
+
+```{r, dpi = 50 }
+
+b <- rbeta(n, 1, 2)  
+a <- rbeta(n,  2, 2) # introduce noise in a
+X <- matrix(NA, t, n)
+X[1,] <- init_size 
+
+for ( i in 2:t ){ 
+    mu <- a + b*X[i-1, ] + beta*E[i-1]
+    X[i, ] <- rnorm(n,  mu, sig) 
+}
+
+dat <- 
+  data.frame(t = 1:t , size = X, E = E) %>% 
+  gather( id, size, starts_with('size')) %>% 
+  mutate( id = as.numeric(factor( id )))
+
+dat <- 
+  dat %>% 
+  group_by( id ) %>% 
+  arrange( id, t ) %>% 
+  mutate(size0 = lag(size), lag1 = lag( E ), lag2 = lag( E, 2 ), lag3 = lag(E, 3), lag4 = lag(E, 4)) %>% 
+  mutate( log_growth = size - size0) %>% 
+  mutate( rll_E = rollmean( lag( E, 2), k = 4, align = 'right', fill = NA)) 
+
+dat_long <- 
+  dat %>% 
+  ungroup() %>% 
+  filter( complete.cases(.)) %>% 
+  gather( lag, Env, starts_with('lag'), rll_E) 
+
+lag_cors <-
+  dat_long %>% 
+  group_by( lag ) %>% 
+  summarise( r = round( cor( log_growth, Env ), 2)) %>% 
+  mutate( label = paste0( 'r = ', r), pos_x = 0.5, pos_y = max(dat$log_growth, na.rm = T )*0.95)
+
+subsamp <- dat_long %>% group_by( t ) %>% sample_frac(0.1, replace = F) # subsample to draw fewer points 
+
+dat_long %>% 
+  ggplot( aes( x = Env, y = log_growth )) + 
+  geom_point( data = subsamp  , aes( x = Env, y= log_growth ), alpha = 0.1) +
+  geom_smooth( method = 'lm', se = F) + 
+  geom_text( data = lag_cors, aes( label = label, x = pos_x, y = pos_y), hjust = 1) + 
+  facet_wrap( ~ lag, nrow = 1, scales = 'free_x')
+
+```
+
+```{r}
+
+m1 <- lm( data = dat, size ~ size0 + lag1 + lag2 + lag3 + lag4 + rll_E )
+summary(m1)
+
+```
+
+In these simulations there is individual variation in the growth process, this variation is not included in the model however.  This leads to weak but often statistically significant negative lag climate climate effects in the fitted model. We could account for individual variation in the growth process by fitting random effects for each plant.  
+
+```{r}
+
+mer1 <- lmer( data = dat, size ~ size0 + lag1 + lag2 + lag3 + rll_E +  (size0|id))
+summary(mer1)
+
+```
+
+This appears to correct for some of the negative lag effects.  But in this case we have many repeated observations of the same plants and each plant has fixed *a* and *b*. In reality most plants are not observed more than a few years.  Moreover the assumption that *a* and *b* are fixed for each plant over time may not be correct. 
+
+```{r}
+
+m1 <- lm( data = dat, size ~ size0 + lag1 + lag2 + lag3 + lag4 + rll_E )
+summary(m1)
+
+```
+

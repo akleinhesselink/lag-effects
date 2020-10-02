@@ -1,0 +1,274 @@
+---
+title: "Bias in estimating lag effects"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+## Goal
+
+We want to understand how annual climate variation affects plant size. How can we properly account for size dependence in growth rate while also measuring annual climate effects at year t and year t-1? 
+
+#### Approach 
+
+Simulate a time series of size dependent plant growth with a simple linear model.
+
+- $y_{t+1} = \beta_0 + \beta_1y_t + \beta_CC_{t} + \beta_LC_{t-1}$, [1]
+
+where $y_t$ is log plant size at time $t$, $C_t$ is climate during the year of growth (i.e. the period between year $t$ and year $t+1$) and $C_{t-1}$ is climate during the year of growth prior to that (i.e. between year $t-1$ and $t$). The coefficient $\beta_0$ is the intercept, or intrinsic growth rate on the log scale, $\beta_1$ is the dependence of growth on size, $\beta_C$ is the coefficient for the climate of the growth year and $\beta_L$ is the coefficient for climate during the year prior to that (i.e. a lag climate effect). 
+
+This model produces growth dynamics for plant log size $y$ that are analogous to a Gompertz population model. 
+
+```{r, setup, include=F, echo = F}
+rm(list = ls())
+library(tidyverse)
+set.seed(1)
+```
+
+```{r , simulation, fig.cap= "Figure 1: Simulated growth of a single plant where *y~t~* is log size in year *t*. "}
+t <- 30 # time 
+y <- rep(NA, t) # log size 
+b0 <- 0.3  # intercept 
+b1 <- 0.5  # size coefficient 
+bC <- 0.1  # growth year climate effect 
+bL <- 0    # lag climate effect 
+init_size <- 0.1 
+C <- rnorm(t)  # Annual climate effects 
+
+# Run model: 
+y[1:2] <- init_size # start at two so that lag climate effects are valid 
+
+for( i in 2:(t-1)){ 
+  y[i+1] <- b0 + b1*y[i] + bC*C[i] + bL*C[i-1]
+}
+
+basic_ylab <- expression( ~ italic(y)[t] )
+basic_xlab <- 'time'
+
+plot(1:t, y, type = 'l', xlab = basic_xlab, ylab = basic_ylab)
+
+```
+#### Simulate many plants at once 
+
+```{r, fig.cap= "Figure 2: Simulated growth of five plants subject to climate variation and random individual annual variation where *y~t~* is log size in year *t*. "}
+n <- 100 # poppulation size 
+init_size <- rnorm(n, 0.1, 0.2)
+
+y <- matrix( NA, nrow = t, ncol = n) # size, columns are individuals, rows is time
+y[1:2, 1:n] <- init_size
+
+eps <- matrix( rnorm( t*n, 0, 0.05), t, n, byrow = T)  # plant by year error
+
+for( i in 2:(t-1)){ 
+  y[i+1, ] <- b0 + b1*y[ i, ] + bC*C[i] + bL*C[i-1] + eps[i, ]
+}
+
+matplot(  y[, 1:5] , type = 'l', xlab = basic_xlab, ylab = basic_ylab ) # plot first five plants 
+
+```
+#### Estimate climate effects 
+
+```{r}
+
+size_dat <- 
+  data.frame(time = 1:t, C = C, y) %>% 
+  gather( plant, size, starts_with('X')) %>% 
+  group_by( plant) %>% 
+  mutate( size0 = lag(size), 
+          C0 = lag(C),       # use C0 to identify climate during transition from t to t+1
+          C_L = lag(C0))     # use CL to identify climate prior to t
+
+
+m1 <- lm(data = size_dat, size ~ size0 + C0 + C_L)
+summary(m1)
+
+```
+
+Demonstrate that using an `nls` model with explicitly defined parameters can fit the data exactly as `lm` above.  
+```{r}
+
+nls_mod1 <- nls(size ~ beta0 + beta1*size0 + betaC*C0 + betaCL*C_L, data = size_dat, start = list(beta0 = 0 , beta1 = 0.1, betaC = 0, betaCL = 0 ))
+summary( nls_mod1)
+
+```
+
+#### Add bias to parameter estimates
+
+_Hypothesis_: adding bias to our parameter estimates for $\beta_0$ and $\beta_s$ will lead to bias in estimates of $\beta_C$ and $\beta_L$.
+
+I will test what happens if our estimates of $\beta_0$ and $\beta_L$ are biased, that is when they are systematically too high or too low. I accomplish this by fixing their parameter values above or below the known "true" value used in the simulation and then fitting with `nls`. Then we can compare the climate parameter estimates to the true climate effects. 
+
+First test the effect of over or underestimating the intercept, $\\\beta_0$.
+
+```{r, fig.cap = "Figure 3. Effect of bias in the intercept, $\\beta_0$, on parameter estimates for $\\beta_1$, growth year climate and climate lag effects. A) Shows the effects on all three parameters. B) Same as in A but showing only effects on growth year climate and lag climate to show more detail."}
+
+bias1 <- seq(-0.3, 0.9, by = 0.05)
+beta0_fixed <- b0 + bias1
+
+nls_mods_bias1 <- list()
+for ( i in 1:length(beta0_fixed)){ 
+  nls_mods_bias1[[i]] <- nls(size ~ beta0_fixed[i] + beta1*size0 + betaC*C0 + betaCL*C_L, data = size_dat, start = list(beta1 = 0.1, betaC = 0, betaCL = 0 ))
+}  
+
+estimates <- data.frame( bias = bias1, do.call( bind_rows, lapply( nls_mods_bias1, coef )  ))
+
+xlab_fig3 <- expression( bias ~ "in" ~ beta[0])
+
+## divide the device into two rows and two columns
+## allocate figure 1 all of row 1
+## allocate figure 2 the intersection of column 2 and row 2
+
+layout(matrix(c(1,2,3,3), 2, 2, byrow = TRUE), widths = (c(10,10)), heights = (c(10,4)))
+par(xpd = T, mar = c(4, 4, 2, 1))
+matplot( x = bias1,  estimates[, c('beta1', 'betaC', 'betaCL' ) ], 
+         type = 'l', 
+         lty = 1, 
+         col = c(1,2,4), 
+         ylab = 'parameter estimate', xlab = xlab_fig3 ) 
+abline(h = c(b1, bC, bL) , lty = 2,  col = c(1,2,4), xpd = F)
+text( -0.3, 1.2, labels = 'A', xpd = T)
+
+matplot( x = bias1,  estimates[, c('betaC', 'betaCL' ) ], 
+         type = 'l', 
+         lty = 1, 
+         col = c(2,4), 
+         ylab = '', 
+         xlab = xlab_fig3 ) 
+
+abline(h = c(bC, bL) , lty = 2,  col = c(2,4), xpd = F)
+text( -0.3, 0.17, labels = 'B', xpd = T)
+
+plot.new()
+legend( x = 0, y = 0.8, 
+        title = 'Estimated coefficients:',
+        title.adj = 0.1,
+        legend =  c(
+          expression( beta[1] ~ "(size effect)"), 
+          expression( beta[C] ~ "(climate effect)"), 
+          expression( beta[L] ~ "(lag climate effect)")), 
+        col = c(1,2,4), 
+        lty = 1)
+legend( x = 0.5, y = 0.8, 
+        title = 'True coefficents:',
+        title.adj = 0.1,
+        legend =  c(
+          expression( beta[1] ~ "(size effect)"), 
+          expression( beta[C] ~ "(climate effect)"), 
+          expression( beta[L] ~ "(lag climate effect)")), 
+        col = c(1,2, 4), 
+        lty = 2)
+
+```
+
+
+Now I will add bias to the $\beta_1$ (size dependence) parameter. 
+
+```{r, fig.cap = "Figure 4. Effect of bias in $\\beta_1$ on parameter estimates for the intercept, $\\beta_0$, growth year climate and climate lag effects. A) Shows the effects on all three parameters. B) Same as in A but showing only effects on growth year climate and lag climate to show more detail."}
+bias2 <- seq(-0.4, 0.5, by = 0.05)
+beta1_fixed <- b1 + bias2 
+
+nls_mods_bias2 <- list()
+for ( i in 1:length(beta1_fixed)){ 
+  nls_mods_bias2[[i]] <- nls(size ~ beta0 + beta1_fixed[i]*size0 + betaC*C0 + betaCL*C_L, data = size_dat, start = list(beta0 = 0.1, betaC = 0, betaCL = 0 ))
+}  
+
+estimates <- data.frame( bias = bias2, do.call( bind_rows, lapply( nls_mods_bias2, coef )  ))
+
+xlab_fig4 <- expression( bias ~ "in" ~ beta[1])
+layout(matrix(c(1,2,3,3), 2, 2, byrow = TRUE), widths = (c(10,10)), heights = (c(10,4)))
+par(xpd = T, mar = c(4, 4, 2, 1))
+matplot( x = bias2,  estimates[, c('beta0', 'betaC', 'betaCL' ) ], 
+         type = 'l', 
+         lty = 1, 
+         col = c(1,2,4), 
+         ylab = 'parameter estimate', xlab = xlab_fig4 ) 
+abline(h = c(b1, bC, bL) , lty = 2,  col = c(1,2,4), xpd = F)
+text( -0.4, 0.6, labels = 'A', xpd = T)
+
+matplot( x = bias2,  estimates[, c('betaC', 'betaCL' ) ], type = 'l', lty = 1, col = c(2,4), 
+         ylab = '', 
+         xlab = xlab_fig4 ) 
+abline(h = c(bC, bL) , lty = 2,  col = c(2,4), xpd = F)
+text( -0.4, 0.12, labels = 'B', xpd = T)
+
+plot.new()
+legend( x = 0, y = 0.8, 
+        title = 'Estimated coefficients:',
+        title.adj = 0.1,
+        legend =  c(
+          expression( beta[0] ~ "(intercept)"), 
+          expression( beta[C] ~ "(climate effect)"), 
+          expression( beta[L] ~ "(lag climate effect)")), 
+        col = c(1,2,4), 
+        lty = 1)
+legend( x = 0.5, y = 0.8, 
+        title = 'True coefficents:',
+        title.adj = 0.1,
+        legend =  c(
+          expression( beta[0] ~ "(intercept)"), 
+          expression( beta[C] ~ "(climate effect)"), 
+          expression( beta[L] ~ "(lag climate effect)")), 
+        col = c(1,2, 4), 
+        lty = 2)
+
+```
+
+```{r}
+
+# Evaluate model errors 
+dev1 <- unlist (lapply( nls_mods_bias1, deviance ))
+plot( bias1, dev1, type = 'l', ylab = 'model error', xlab = expression( bias ~ "in" ~ beta[0]))
+
+```
+
+```{r}
+
+dev2 <- unlist (lapply( nls_mods_bias2, deviance ))
+plot( bias2, dev2, type = 'l', ylab = 'model error',  xlab = expression( bias ~ "in" ~ beta[1]))
+
+```
+
+```{r}
+# one step a head predictions 
+
+y_pred_bias1 <- lapply( nls_mods_bias1, predict)
+y_pred_bias2 <- lapply( nls_mods_bias2, predict)
+y_pred <- matrix( y_pred_bias1[[5]], t-2, n)
+
+matplot(  y[-c(1:2), 1:3] , type = 'l', xlab = basic_xlab, ylab = basic_ylab, col = 'black') # plot first three plants 
+matpoints(  y_pred[, 1:3] , type = 'l', xlab = basic_xlab, ylab = basic_ylab, col = 'red') # plot first three plants 
+legend( 20, 0.35, c('Simulated', 'Predicted'), col = c('black', 'red'), xpd = T, lty = 1)
+
+```
+
+### Discussion  
+
+This quick simulation shows that estimates of lag climate effects are affected by errors estimating the intercept and size dependence coefficients (Figs 3 & 4). Importantly the estimate of the lag climate effect appears to be more sensitive to these errors than the growth year climate effect. Errors in estimates of growth year and lag climate coefficients also appear to be negatively associated: if the estimate for growth year climate is too high, then the estimate for the lag year climate effect is too low. The estimates for the climate effects also move in opposite directions depending on whether bias is introduced in intercept, $\beta_0$, or in the size dependence, $\beta_1$.  When the true climate effect is positive and the true climate lag effect is zero, a positive bias in the intercept leads to a positive lag climate effect, whereas a negative bias leads to a negative lag climate effect (Figure 3).  The opposite is true for the size dependence coefficient: a positive bias in this parameter leads to a negative lag climate effect, while a negative bias leads to a positive lag climate effect (Figure 4). 
+
+I am not sure if these statistical errors are at work when we attempt to fit climate effects to real data.  However, it is suspicious that we often find lag climate effects of an opposite sign to growth year climate effects.  For instance, in our Idaho data and in my sagebrush cover analysis I found cases where growth year precipitation had a positive coefficient but lag year precipitation had a negative coefficient.  This effect would be consistent with our model either underestimating $\beta_0$ or overestimating $\beta_1$ (or perhaps not estimating the correlated error of these parameters correctly). 
+
+#### The intercept and size dependent coefficient are negatively related. 
+
+Not surprisingly, introducing a large bias in the intercept, $\beta_0$, leads to a large error in estimating the size coefficient $\beta_1$ parameter (Figure 3A) and vice versa (Figure 4A).  If the sign of the bias in either parameter is positive (negative) then the sign of the error in estimating the other parameter is negative (positive). These coordinated changes make sense. As an example consider a plant growing until it reaches its "equilibrium" size $\widehat{y}$ where size in year $t+1$ is roughly equal to size in year $t$ (+/- the effects of annual climate).  If many plants in our data are near this size then the parameters $beta_0$ and $beta_1$ must be consistent with that long term average size.  We can express this algebraically,  
+
+$\widehat y = \beta_0 + \beta_1 \widehat y$, 
+
+where $y_{t+1}$ = $y_t$ = $\widehat y$ and where $\beta_0>0$ and $\beta_1 < 1$. 
+
+Given these conditions, 
+
+$0 = \beta_0 + \widehat y(\beta_1 - 1 )$.  
+
+In order to balance this equation, any overestimate of $beta_0$ requires underestimating $beta_1$. (As an aside, when I fit random year effects for both the intercept $beta_0$ and slope of size $beta_1$ to real data, these random year effects are usually negatively correlated, demonstrating this phenomenon). 
+
+#### Why is the lag climate effect more sensitive to bias than the growth year climate effect?
+
+While the absolute magnitude of the fitted lag climate effect was almost always smaller than the fitted growth year climate effect, the former appeared to be much more sensitive to the biases introduced in $\beta_0$ and $\beta_1$.  I don't know why but this is really key to understanding what is going on here and if it applies to emperical datasets. 
+
+#### Are our estimates of $\beta_0$ and $\beta_1$ biased?  
+
+I'm not sure and I don't know that there would be a way to know for sure since these are phenomenological parameters.  It seems reasonable to assume that at the very least $\beta_0$ and $\beta_1$ are not the same for every plant.  Thus, any overestimate of these parameters for some plants and underestimates for others could affect the climate lag effects.  This was the subject of the other simulation I sent out earlier.  It would be very hard to get these parameters "right" for every plant.  Moreover, observation error is known to introduce biases in density dependence and my intuition is that it could introduce a similar type of error in $\beta_0$ and $\beta_1$.  Perhaps this would then have opposite effects on the growth year climate parameter and lag climate parameters. ( ?? )
+
